@@ -69,11 +69,11 @@ func (r *statusRecorder) Flush() {
 type Event string
 
 const (
-	EventChat       Event = "chat"
-	EventComplete   Event = "complete"
-	EventLoading    Event = "loading"
-	EventToolResult Event = "tool_result" // Used for both tool calls and their results
-	EventThinking   Event = "thinking"
+	EventChat          Event = "chat"
+	EventComplete      Event = "complete"
+	EventLoading       Event = "loading"
+	EventToolResult    Event = "tool_result" // Used for both tool calls and their results
+	EventThinking      Event = "thinking"
 	EventToolCall      Event = "tool_call"
 	EventDownload      Event = "download"
 	EventImageProgress Event = "image_progress"
@@ -94,10 +94,34 @@ type Server struct {
 	// Dev is true if the server is running in development mode
 	Dev bool
 
+	// ── Inference parameters (from CLI flags) ─────────────────────────
+	// Zero values mean "let the model use its own default".
+	ContextLength int
+	Temperature   float64
+	TopK          int
+	TopP          float64
+
+	// ── Ollama server address (from optional positional arg) ──────────
+	// Defaults: host = "127.0.0.1", port = 11434.
+	OllamaHost string
+	OllamaPort int
 }
 
-func localHost() *url.URL {
-	return &url.URL{Scheme: "http", Host: "127.0.0.1:11434"}
+// ollamaURL returns the URL of the remote Ollama server that this UI
+// proxies to.  It is derived from the OllamaHost / OllamaPort fields.
+func (s *Server) ollamaURL() *url.URL {
+	host := s.OllamaHost
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	port := s.OllamaPort
+	if port == 0 {
+		port = 11434
+	}
+	return &url.URL{
+		Scheme: "http",
+		Host:   fmt.Sprintf("%s:%d", host, port),
+	}
 }
 
 func (s *Server) log() *slog.Logger {
@@ -108,9 +132,9 @@ func (s *Server) log() *slog.Logger {
 }
 
 // The React/HTML frontend is prohibited by CORS from making a cross-origin request
-// so ollamaProxy creates a reverse proxy handler to the Ollama server at 11434
+// so ollamaProxy creates a reverse proxy handler to the Ollama server
 func (s *Server) ollamaProxy() http.Handler {
-	return httputil.NewSingleHostReverseProxy(localHost())
+	return httputil.NewSingleHostReverseProxy(s.ollamaURL())
 }
 
 type errHandlerFunc func(http.ResponseWriter, *http.Request) error
@@ -249,7 +273,7 @@ func (s *Server) httpClient() *http.Client {
 // inferenceClient uses almost the same HTTP client, but without a timeout so
 // long requests aren't truncated
 func (s *Server) inferenceClient() *api.Client {
-	return api.NewClient(localHost(), userAgentHTTPClient(0))
+	return api.NewClient(s.ollamaURL(), userAgentHTTPClient(0))
 }
 
 func userAgentHTTPClient(timeout time.Duration) *http.Client {
@@ -261,23 +285,31 @@ func userAgentHTTPClient(timeout time.Duration) *http.Client {
 	}
 }
 
-// WaitForServer waits for the Ollama server to be ready
-func WaitForServer(ctx context.Context, timeout time.Duration) error {
-	c := api.NewClient(localHost(), userAgentHTTPClient(0))
+// WaitForServer waits for the Ollama server to be ready.
+// It is a method on Server so that it can resolve the correct host/port
+// from the configured OllamaHost / OllamaPort fields.
+func (s *Server) WaitForServer(ctx context.Context, timeout time.Duration) error {
+	c := api.NewClient(s.ollamaURL(), userAgentHTTPClient(0))
 
+	deadline := time.After(timeout)
 	for {
 		_, err := c.Version(ctx)
 		if err == nil {
 			slog.Debug("ollama server is ready")
 			return nil
 		}
-		time.Sleep(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline:
+			return fmt.Errorf("timeout waiting for Ollama server at %s to be ready", s.ollamaURL().Host)
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
-	return errors.New("timeout waiting for Ollama server to be ready")
 }
 
 func (s *Server) createChat(w http.ResponseWriter, r *http.Request) error {
-	if err := WaitForServer(r.Context(), 10*time.Second); err != nil {
+	if err := s.WaitForServer(r.Context(), 10*time.Second); err != nil {
 		return err
 	}
 
@@ -787,11 +819,11 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) error {
 						flusher.Flush()
 
 						json.NewEncoder(w).Encode(responses.ChatEvent{
-							EventName:      "tool_result",
-							Content:        &errContent,
-							ToolName:       &toolCall.Function.Name,
-							ToolResult:     &toolResult,
-							ToolResultData: nil, // No result data for errors
+							EventName:        "tool_result",
+							Content:          &errContent,
+							ToolName:         &toolCall.Function.Name,
+							ToolResult:       &toolResult,
+							ToolResultData:   nil, // No result data for errors
 						})
 						flusher.Flush()
 						continue
@@ -843,12 +875,12 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) error {
 					var toolState any = nil
 
 					json.NewEncoder(w).Encode(responses.ChatEvent{
-						EventName:      "tool_result",
-						Content:        &content,
-						ToolName:       &toolCall.Function.Name,
-						ToolResult:     &toolResult,
-						ToolResultData: result,
-						ToolState:      toolState,
+						EventName:        "tool_result",
+						Content:          &content,
+						ToolName:         &toolCall.Function.Name,
+						ToolResult:       &toolResult,
+						ToolResultData:   result,
+						ToolState:        toolState,
 					})
 					flusher.Flush()
 				}
@@ -989,7 +1021,7 @@ func (s *Server) getChat(w http.ResponseWriter, r *http.Request) error {
 		return nil //nolint:nilerr
 	}
 
-	// fill missing tool_name on tool messages (from previous tool_calls) so labels don’t flip after reload.
+	// fill missing tool_name on tool messages (from previous tool_calls) so labels don't flip after reload.
 	if chat != nil && len(chat.Messages) > 0 {
 		for i := range chat.Messages {
 			if chat.Messages[i].Role == "tool" && chat.Messages[i].ToolName == "" && chat.Messages[i].ToolResult != nil {
@@ -1073,12 +1105,12 @@ func chatEventFromApiChatResponse(res api.ChatResponse, thinkingTimeStart *time.
 		}
 
 		return responses.ChatEvent{
-			EventName:         "assistant_with_tools",
-			Content:           content,
-			Thinking:          thinking,
-			ToolCalls:         storeToolCalls,
-			ThinkingTimeStart: thinkingTimeStart,
-			ThinkingTimeEnd:   thinkingTimeEnd,
+			EventName:          "assistant_with_tools",
+			Content:            content,
+			Thinking:           thinking,
+			ToolCalls:          storeToolCalls,
+			ThinkingTimeStart:  thinkingTimeStart,
+			ThinkingTimeEnd:    thinkingTimeEnd,
 		}
 	}
 
@@ -1343,6 +1375,25 @@ func (s *Server) buildChatRequest(chat *store.Chat, model string, think any, ava
 		Messages: msgs,
 		Stream:   ptr(true),
 		Think:    thinkValue,
+	}
+
+	opts := map[string]any{}
+
+	if s.ContextLength > 0 {
+		opts["num_ctx"] = s.ContextLength
+	}
+	if s.Temperature > 0 {
+		opts["temperature"] = s.Temperature
+	}
+	if s.TopK > 0 {
+		opts["top_k"] = s.TopK
+	}
+	if s.TopP > 0 {
+		opts["top_p"] = s.TopP
+	}
+
+	if len(opts) > 0 {
+		req.Options = opts
 	}
 
 	if len(availableTools) > 0 {
