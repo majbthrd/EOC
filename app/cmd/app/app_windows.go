@@ -370,13 +370,29 @@ func centerWindow(ptr unsafe.Pointer) {
 		y = 0
 	}
 
+	// First call: nudge width by 1px to guarantee a WM_SIZE is delivered.
+	// WebView2 on some Windows builds does not start rendering until it
+	// receives WM_SIZE, and SetWindowPos with identical dimensions is
+	// silently optimised away by the window manager.
 	pSetWindowPos.Call(
 		hwnd,
 		uintptr(HWND_TOP),
 		uintptr(x),
 		uintptr(y),
-		uintptr(windowWidth),  // Keep original width
-		uintptr(windowHeight), // Keep original height
+		uintptr(windowWidth+1), // temporary +1 to force WM_SIZE
+		uintptr(windowHeight),
+		uintptr(SWP_SHOWWINDOW),
+	)
+
+	// Second call: restore the intended dimensions (triggers a second
+	// WM_SIZE so WebView2 lays out to the correct size).
+	pSetWindowPos.Call(
+		hwnd,
+		uintptr(HWND_TOP),
+		uintptr(x),
+		uintptr(y),
+		uintptr(windowWidth),
+		uintptr(windowHeight),
 		uintptr(SWP_SHOWWINDOW),
 	)
 }
