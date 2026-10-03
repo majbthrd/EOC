@@ -84,7 +84,7 @@ export default function MessageList({
 
   return (
     <div
-      className="mx-auto flex max-w-[768px] flex-1 flex-col px-6 pb-12 select-text"
+      className="mx-auto flex flex-1 flex-col px-6 pb-12 select-text"
       data-role="message-list"
     >
       {messages.map((message, idx) => {
