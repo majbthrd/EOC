@@ -175,10 +175,6 @@ func main() {
 	// On Windows, focus the existing instance; on other platforms, kill it
 	handleExistingInstance(startHidden)
 
-	// on macOS, offer the user to create a symlink
-	// from /usr/local/bin/ollama to the app bundle
-	installSymlink()
-
 	var ln net.Listener
 	if devMode {
 		// Use a fixed port in dev mode for predictable API access

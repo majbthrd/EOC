@@ -9,7 +9,7 @@ The great thing about open-source is that the software can be customized to suit
 
 ## Limitations
 
-This is a work in progress.  Limited testing has been done in Linux and Windows; no resources are available for macOS testing.
+This is a work in progress.  App has been used regularly in Linux and Windows with no apparent issues; limited testing has been done with macOS.
 
 ## Building
 
@@ -18,11 +18,13 @@ This is a work in progress.  Limited testing has been done in Linux and Windows;
 ```bash
 sudo apt install build-essentials libwebkit2gtk-4.1-0 libgtk-3-0 zenity libwebkit2gtk-4.1-dev libgtk-3-dev golang-go nodejs npm
 ```
-### Windows Prerequisites
+### base Windows and macOS Prerequisites
 
 Download and install [Go Compiler](https://go.dev/doc/install).
 
 Download and install [Node.js](https://nodejs.org/en/download).
+
+### additional Windows-only Prerequisites
 
 Download and install [MinGW-W64](https://www.mingw-w64.org/downloads/) (MinGW-W64 is needed to compile the Webview library; without this, the Go compiler gives a cryptic and unhelpful "undefined: webview" error).
 
@@ -34,12 +36,12 @@ Download and extract the source code to a "EOC" subdirectory.  One way of doing 
 git clone https://github.com/majbthrd/EOC.git
 ```
 
-### Linux Build
+### Linux and macOS Build
 
 
 ```bash
 cd EOC
-bash build.sh
+./build.sh
 ```
 
 ### Windows Build

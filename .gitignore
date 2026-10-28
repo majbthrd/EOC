@@ -2,3 +2,4 @@ app/ui/app/dist
 app/ui/app/node_modules
 EOC
 EOC.exe
+.DS_Store
