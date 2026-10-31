@@ -101,6 +101,10 @@ type Server struct {
 	TopK          int
 	TopP          float64
 
+	// ── System prompt (loaded from file via -system-prompt flag) ──────
+	// Empty string means no system prompt is injected into requests.
+	SystemPrompt string
+
 	// ── Ollama server address (from optional positional arg) ──────────
 	// Defaults: host = "127.0.0.1", port = 11434.
 	OllamaHost string
@@ -1295,6 +1299,12 @@ func supportsBrowserTools(model string) bool {
 // buildChatRequest converts store.Chat to api.ChatRequest
 func (s *Server) buildChatRequest(chat *store.Chat, model string, think any, availableTools []map[string]any) (*api.ChatRequest, error) {
 	var msgs []api.Message
+
+	// If a system prompt was loaded from file, prepend it as the first message.
+	if s.SystemPrompt != "" {
+		msgs = append(msgs, api.Message{Role: "system", Content: s.SystemPrompt})
+	}
+
 	for _, m := range chat.Messages {
 		// Skip empty messages if present
 		if m.Content == "" && m.Thinking == "" && len(m.ToolCalls) == 0 && len(m.Attachments) == 0 {

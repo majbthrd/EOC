@@ -16,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/majbthrd/EOC/app/store"
@@ -37,13 +38,63 @@ var (
 
 type appMove int
 
+// maxSystemPromptFileSize is the maximum allowed size (in bytes) for the
+// system prompt file specified via the -system-prompt flag.
+const maxSystemPromptFileSize = 1 * 1024 * 1024 // 1 MiB
+
 // AppConfig holds user-supplied inference parameters.
 // Zero / negative values mean "use the model default".
 type AppConfig struct {
-	ContextLength int     // num_ctx; 0 = default
-	Temperature   float64 // 0 = default (Ollama default is 0.7)
-	TopK          int     // 0 = default
-	TopP          float64 // 0 = default
+	ContextLength    int     // num_ctx; 0 = default
+	Temperature      float64 // 0 = default (Ollama default is 0.7)
+	TopK             int     // 0 = default
+	TopP             float64 // 0 = default
+	SystemPromptFile string  // path to file containing system prompt; empty = no system prompt
+}
+
+// loadSystemPrompt reads and validates the system prompt file at the given
+// path. It returns the file content as a string, or an error if:
+//   - the file cannot be accessed
+//   - the file exceeds maxSystemPromptFileSize
+//   - the file contains invalid UTF-8 sequences
+//   - the file contains non-text bytes (null bytes, C0 control characters
+//     other than tab/newline/CR, or DEL) that the LLM API would reject
+func loadSystemPrompt(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("system prompt file: %w", err)
+	}
+	if info.Size() > maxSystemPromptFileSize {
+		return "", fmt.Errorf("system prompt file %q exceeds maximum size of %d bytes (file is %d bytes)",
+			path, maxSystemPromptFileSize, info.Size())
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("system prompt file: %w", err)
+	}
+
+	// Validate UTF-8 encoding.
+	if !utf8.Valid(data) {
+		return "", fmt.Errorf("system prompt file %q contains invalid UTF-8 sequences", path)
+	}
+
+	// Reject bytes that the LLM API (which expects JSON-encoded text)
+	// would not accept: null bytes, C0 control characters other than
+	// tab (0x09), newline (0x0A), and carriage return (0x0D), and DEL (0x7F).
+	for i, b := range data {
+		if b == 0x00 {
+			return "", fmt.Errorf("system prompt file %q contains a null byte at offset %d", path, i)
+		}
+		if b < 0x20 && b != '\t' && b != '\n' && b != '\r' {
+			return "", fmt.Errorf("system prompt file %q contains non-text byte 0x%02X at offset %d", path, b, i)
+		}
+		if b == 0x7F {
+			return "", fmt.Errorf("system prompt file %q contains DEL byte (0x7F) at offset %d", path, i)
+		}
+	}
+
+	return string(data), nil
 }
 
 const (
@@ -149,6 +200,23 @@ func main() {
 	fs.Float64Var(&cfg.Temperature, "temperature", 0, "sampling temperature; 0 = model default")
 	fs.IntVar(&cfg.TopK, "topk", 0, "top-k sampling; 0 = model default")
 	fs.Float64Var(&cfg.TopP, "topp", 0, "top-p (nucleus) sampling; 0 = model default")
+	fs.StringVar(&cfg.SystemPromptFile, "system-prompt", "", "path to file containing the system prompt; empty = no system prompt")
+
+	// Custom usage that includes the optional positional argument.
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: %s [options] [server-address]\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Options:\n")
+		fs.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\nServer address (optional positional argument):\n")
+		fmt.Fprintf(os.Stderr, "  A host, port, or host:port for the Ollama server.\n")
+		fmt.Fprintf(os.Stderr, "  Defaults to %s:%d if omitted.\n", defaultOllamaHost, defaultOllamaPort)
+		fmt.Fprintf(os.Stderr, "  Examples:\n")
+		fmt.Fprintf(os.Stderr, "    192.168.0.1          → host=192.168.0.1, port=%d\n", defaultOllamaPort)
+		fmt.Fprintf(os.Stderr, "    12000                → host=%s,   port=12000\n", defaultOllamaHost)
+		fmt.Fprintf(os.Stderr, "    192.168.0.1:12000    → host=192.168.0.1, port=12000\n")
+		fmt.Fprintf(os.Stderr, "    [::1]:%d          → host=::1,         port=%d\n", defaultOllamaPort, defaultOllamaPort)
+		fmt.Fprintf(os.Stderr, "\nFlags must appear before the server-address argument.\n")
+	}
 
 	fs.Parse(os.Args[1:])
 
@@ -158,11 +226,36 @@ func main() {
 	ollamaHost := defaultOllamaHost
 	ollamaPort := defaultOllamaPort
 	if args := fs.Args(); len(args) > 0 {
+		// Go's flag package stops parsing at the first non-flag argument.
+		// If the user placed flags after the positional argument, those
+		// "flags" end up in fs.Args() as literal strings beginning with "-".
+		// Detect and reject that case with a helpful message.
+		for i, arg := range args[1:] {
+			if strings.HasPrefix(arg, "-") {
+				fmt.Fprintf(os.Stderr,
+					"Error: unexpected argument %q at position %d; flags must be placed before the server-address argument\n\n",
+					arg, i+1)
+				fs.Usage()
+				os.Exit(1)
+			}
+		}
+
 		var addrErr error
 		ollamaHost, ollamaPort, addrErr = parseServerAddr(args[0])
 		if addrErr != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", addrErr)
 			fs.Usage()
+			os.Exit(1)
+		}
+	}
+
+	// Load and validate the system prompt file if provided.
+	systemPrompt := ""
+	if cfg.SystemPromptFile != "" {
+		var spErr error
+		systemPrompt, spErr = loadSystemPrompt(cfg.SystemPromptFile)
+		if spErr != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", spErr)
 			os.Exit(1)
 		}
 	}
@@ -233,6 +326,8 @@ func main() {
 		Temperature:   cfg.Temperature,
 		TopK:          cfg.TopK,
 		TopP:          cfg.TopP,
+		// ── system prompt (loaded from file, validated) ───────────────
+		SystemPrompt:  systemPrompt,
 		// ── Ollama server address (from optional positional arg) ──────
 		OllamaHost:    ollamaHost,
 		OllamaPort:    ollamaPort,
